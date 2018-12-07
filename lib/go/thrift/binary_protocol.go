@@ -25,55 +25,43 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"sync"
+
+	"github.com/m3db/m3x/pool"
 )
 
-// MaxBytesPoolAlloc is the constant for how big the slices being allocated
-// from the bytes pool are, if the bytes required is larger then they should
-// not come from the pool.
-const MaxBytesPoolAlloc = 1024
-
-// BytesPoolPut is a public func to call to return pooled bytes to, each
-// the capacity of BytesPoolAlloc.  TBinaryProtocol.ReadBinary uses this pool
-// to allocate from if the size of the bytes required to return is is equal or
-// less than BytesPoolAlloc.
-func BytesPoolPut(b []byte) bool {
-	if cap(b) != MaxBytesPoolAlloc {
-		return false
+var (
+	bytesPoolBuckets = []pool.Bucket{
+		// Support for 8k buffers of size 1024 in use at any one time
+		{Count: 8192, Capacity: 1024},
+		// Support for 1k buffers of size 4096 in use at any one time
+		{Count: 1024, Capacity: 4096},
 	}
-	element := bytesWrapperPool.Get().(*bytesWrapper)
-	element.value = b
-	bytesPool.Put(element)
-	return true
+	bytesPool pool.BytesPool
+)
+
+func init() {
+	poolOpts := pool.NewObjectPoolOptions()
+	pool := pool.NewBytesPool(bytesPoolBuckets, poolOpts)
+	pool.Init()
+	SetBytesPool(pool)
 }
 
-// BytesPoolGet returns a pooled byte slice of capacity BytesPoolAlloc.
-func BytesPoolGet() []byte {
-	element := bytesPool.Get().(*bytesWrapper)
-	result := element.value
-	element.value = nil
-	bytesWrapperPool.Put(element)
-	return result
+// SetBytesPool sets the bytes pool, note: must set this before opening
+// any thrift transports or else this is unsafe (racey).
+func SetBytesPool(v pool.BytesPool) {
+	bytesPool = v
 }
 
-// bytesWrapper is used to wrap a byte slice to avoid allocing a interface{}
-// when wrapping a byte slice which is usually passed on the stack
-type bytesWrapper struct {
-	value []byte
+// BytesPoolPut is a public func to call to return pooled bytes to.
+// TBinaryProtocol.ReadBinary uses this pool to allocate from, so returning
+// to this pool if it came from ReadBinary helps the pool stay healthy.
+func BytesPoolPut(b []byte) {
+	bytesPool.Put(b)
 }
 
-var bytesWrapperPool = sync.Pool{
-	New: func() interface{} {
-		return &bytesWrapper{}
-	},
-}
-
-var bytesPool = sync.Pool{
-	New: func() interface{} {
-		element := bytesWrapperPool.Get().(*bytesWrapper)
-		element.value = make([]byte, MaxBytesPoolAlloc)
-		return element
-	},
+// BytesPoolGet returns a pooled byte slice of desired capacity.
+func BytesPoolGet(size int) []byte {
+	return bytesPool.Get(size)[:size]
 }
 
 type TBinaryProtocol struct {
@@ -500,13 +488,7 @@ func (p *TBinaryProtocol) ReadBinary() ([]byte, error) {
 	}
 
 	isize := int(size)
-
-	var buf []byte
-	if isize <= MaxBytesPoolAlloc {
-		buf = BytesPoolGet()[:isize]
-	} else {
-		buf = make([]byte, isize)
-	}
+	buf := BytesPoolGet(isize)
 
 	_, err := io.ReadFull(p.trans, buf)
 	return buf, NewTProtocolException(err)

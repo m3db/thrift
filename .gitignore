@@ -277,3 +277,5 @@ test-driver
 /ylwrap
 
 /cmake_*
+vendor/
+

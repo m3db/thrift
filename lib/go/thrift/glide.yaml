@@ -1,0 +1,4 @@
+package: github.com/m3db/thrift/lib/go/thrift
+import:
+- name: github.com/m3db/m3x
+  version: 647a4a05078f018242070cbd71bea6ecba964199
